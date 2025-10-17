@@ -1,5 +1,16 @@
 idf_component_register(
-    SRCS "RideLink_main.cpp"
-    REQUIRES driver
-    PRIV_REQUIRES spi_flash
+    SRCS
+        "RideLink_main.cpp"
+        "../src/Display.cpp"
+        "../src/GPS.cpp"
+        "../src/LoRa.cpp"
+        "../src/Orientation.cpp"
+    INCLUDE_DIRS
+        "../include"
+    REQUIRES
+        driver
+        esp_lcd
+        freertos
+    PRIV_REQUIRES
+        spi_flash
 )
