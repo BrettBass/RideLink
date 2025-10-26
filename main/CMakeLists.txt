@@ -4,7 +4,7 @@ idf_component_register(
         "../src/Display.cpp"
         "../src/GPS.cpp"
         "../src/LoRa.cpp"
-        "../src/Orientation.cpp"
+        "../src/Compass.cpp"
     INCLUDE_DIRS
         "../include"
     REQUIRES

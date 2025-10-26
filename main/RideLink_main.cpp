@@ -1,101 +1,86 @@
 #include <cstdio>
 #include "freertos/FreeRTOS.h"
-#include "freertos/FreeRTOSConfig_arch.h"
-#include "freertos/idf_additions.h"
-#include "driver/gpio.h"
-#include "soc/gpio_num.h"
+#include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_system.h"
-#include "Display.hpp"
+#include "GPS.hpp"
 
-static const char *TAG = "RIDE_LINK";
+static const char *TAG = "GPS_TEST";
 
-#define LED_PIN GPIO_NUM_12
+GPS gps;
 
-Display display;
-
-void led_setup(const gpio_num_t led_pin);
-void led_blink_task(void *pvParameters);
-void display_test_task(void *pvParameters);
-
-extern "C" void app_main(void)
+void gps_test_task(void *pvParameters)
 {
-    printf("RideLink: C++ Application Starting Up...\n");
+    ESP_LOGI(TAG, "GPS Test Task Started");
 
-    led_setup(LED_PIN);
-
-    // Initialize display
-    if (!display.init()) {
-        ESP_LOGE(TAG, "Failed to initialize display!");
+    // Initialize GPS (RX=GPIO16, TX=GPIO17 are ESP32 defaults for UART2)
+    if (!gps.init(16, 17, 9600)) {
+        ESP_LOGE(TAG, "Failed to initialize GPS!");
+        vTaskDelete(NULL);
         return;
     }
 
-    // Create tasks with larger stack for display task
-    xTaskCreate(led_blink_task, "LED_Blink", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(display_test_task, "Display_Test", 8192, NULL, tskIDLE_PRIORITY + 2, NULL);
+    ESP_LOGI(TAG, "GPS initialized. Waiting for satellite fix...");
+    ESP_LOGI(TAG, "This can take 30-60 seconds outdoors with clear sky view.");
+    ESP_LOGI(TAG, "NOTE: GPS won't work indoors!");
 
-    printf("RideLink: Tasks created. app_main exiting...\n");
-}
+    bool first_fix = false;
+    int no_fix_count = 0;
 
-void led_setup(const gpio_num_t led_pin)
-{
-    gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    io_conf.pin_bit_mask = (1ULL << led_pin);
-    gpio_config(&io_conf);
-}
-
-void led_blink_task(void *pvParameters)
-{
-    uint8_t led_state = 0;
     while (true) {
-        printf("RideLink: C++ Application running...\n");
-        led_state = !led_state;
-        gpio_set_level(LED_PIN, led_state);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
+        // Update GPS (reads and parses NMEA data)
+        bool new_data = gps.update();
 
-void display_test_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "Display test task started");
-    ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
+        // Check if we have a valid fix
+        if (gps.isValid()) {
+            if (!first_fix) {
+                ESP_LOGI(TAG, "");
+                ESP_LOGI(TAG, "========================================");
+                ESP_LOGI(TAG, "GPS FIX ACQUIRED!");
+                ESP_LOGI(TAG, "========================================");
+                first_fix = true;
+            }
 
-    // Wait for display to be ready
-    vTaskDelay(pdMS_TO_TICKS(500));
+            // Display info every time we get new data
+            if (new_data) {
+                gps.displayInfo();
 
-    // First test - fill with solid colors to verify display is working
-    ESP_LOGI(TAG, "Testing solid colors...");
-    display.fillScreen(Color::RED);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    display.fillScreen(Color::GREEN);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    display.fillScreen(Color::BLUE);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+                // Get location
+                Location loc = gps.getLocation();
 
-    ESP_LOGI(TAG, "Color test complete, starting arrow rotation");
-    ESP_LOGI(TAG, "Free heap after color test: %lu bytes", esp_get_free_heap_size());
+                // Example: Calculate distance and bearing to a target location
+                // (Replace these with your actual target coordinates)
+                double target_lat = 37.7749;  // San Francisco
+                double target_lon = -122.4194;
 
-    // Clear screen to black
-    display.fillScreen(Color::BLACK);
+                int distance = gps.distanceTo(target_lat, target_lon);
+                int bearing = gps.bearingTo(target_lat, target_lon);
 
-    int angle = 0;
+                ESP_LOGI(TAG, "Distance to target: %d meters, Bearing: %d°",
+                        distance, bearing);
+            }
 
-    // Infinite loop - smoothly rotate arrow 360 degrees
-    while (true) {
-        ESP_LOGI(TAG, "Drawing arrow at angle: %d degrees", angle);
+            no_fix_count = 0;
+        } else {
+            // No fix yet
+            no_fix_count++;
 
-        // Use updateArrow for smooth animation (only redraws if angle changed enough)
-        display.updateArrow(angle, Color::GREEN);
+            // Show progress every 5 seconds
+            if (no_fix_count % 50 == 0) {
+                ESP_LOGI(TAG, "Still waiting for GPS fix... (%d satellites visible)",
+                        gps.getSatellites());
+                ESP_LOGI(TAG, "Make sure you're outdoors with clear view of sky!");
+            }
+        }
 
-        // Increment angle
-        angle = (angle + 10) % 360;
-
-        // Small delay for smooth rotation
+        // Update at 10Hz
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
+extern "C" void app_main(void)
+{
+    printf("GPS Test Program Starting...\n");
+
+    // Create GPS task
+    xTaskCreate(gps_test_task, "GPS_Test", 8192, NULL, 5, NULL);
+}
