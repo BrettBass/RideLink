@@ -122,10 +122,13 @@ bool GPS::parseNMEA(const char* sentence)
     }
 
     // Parse different sentence types
-    if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0) {
+    // Handle both $GPGGA and $GNGGA (GPS only vs GPS+GLONASS combined)
+    if (strncmp(sentence, "$GPGGA", 6) == 0 ||
+        strncmp(sentence, "$GNGGA", 6) == 0) {
         return parseGPGGA(sentence);
     }
-    else if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0) {
+    else if (strncmp(sentence, "$GPRMC", 6) == 0 ||
+             strncmp(sentence, "$GNRMC", 6) == 0) {
         return parseGPRMC(sentence);
     }
 
@@ -400,4 +403,3 @@ void GPS::displayInfo()
         ESP_LOGI(TAG, "GPS: No fix yet (Satellites: %d)", satellites);
     }
 }
-
