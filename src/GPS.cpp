@@ -1,405 +1,327 @@
 #include "GPS.hpp"
 #include "driver/uart.h"
+#include "driver/gpio.h"
+
 #include "esp_log.h"
 #include <cstring>
-#include <cmath>
 #include <cstdlib>
+#include <cmath>
 
-static const char *TAG = "GPS";
+static const char* TAG = "GPS";
 
-#define UART_NUM UART_NUM_2
-#define UART_BUF_SIZE 1024
-#define EARTH_RADIUS_KM 6371.0
+// ESP32 UART2 pins - can be any GPIO
+#define GPS_TX_PIN GPIO_NUM_26  // TX2 (GPS RX connects here)
+#define GPS_RX_PIN GPIO_NUM_25  // RX2 (GPS TX connects here)
+#define GPS_UART_NUM UART_NUM_2
+#define GPS_BAUD_RATE 9600
 
 GPS::GPS()
-    : nmea_index(0)
-    , parsing_sentence(false)
-    , current_lat(0.0)
-    , current_lon(0.0)
-    , satellites(0)
-    , speed_kmh(0.0f)
-    , altitude_m(0.0f)
-    , fix_valid(false)
-    , last_update_ms(0)
-{
-    memset(nmea_buffer, 0, sizeof(nmea_buffer));
+    : latitude(0.0)
+    , longitude(0.0)
+    , altitude(0.0)
+    , hdop_value(99.9)
+    , satellite_count(0)
+    , is_fixed(false)
+    , last_fix_time(0)
+    , line_index(0) {
+    memset(nmea_line, 0, sizeof(nmea_line));
 }
 
-GPS::~GPS()
-{
-    uart_driver_delete(UART_NUM);
+GPS::~GPS() {
+    uart_driver_delete(GPS_UART_NUM);
 }
 
-bool GPS::init(int rx_pin, int tx_pin, uint32_t baud)
-{
-    ESP_LOGI(TAG, "Initializing GPS on UART2 (RX=GPIO%d, TX=GPIO%d, baud=%lu)",
-             rx_pin, tx_pin, baud);
+bool GPS::begin() {
+    ESP_LOGI(TAG, "Initializing GPS on TX=%d (to GPS RX), RX=%d (to GPS TX)", GPS_TX_PIN, GPS_RX_PIN);
 
     uart_config_t uart_config = {
-        .baud_rate = (int)baud,
+        .baud_rate = GPS_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 122,
+        .rx_flow_ctrl_thresh = 0,
+        .source_clk = UART_SCLK_DEFAULT,
     };
 
-    // Configure UART parameters
-    esp_err_t ret = uart_param_config(UART_NUM, &uart_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure UART: %s", esp_err_to_name(ret));
+    // Configure UART
+    if (uart_param_config(GPS_UART_NUM, &uart_config) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure UART");
         return false;
     }
 
-    // Set UART pins
-    ret = uart_set_pin(UART_NUM, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set UART pins: %s", esp_err_to_name(ret));
+    // Set pins
+    if (uart_set_pin(GPS_UART_NUM, GPS_TX_PIN, GPS_RX_PIN,
+                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set UART pins");
         return false;
     }
 
-    // Install UART driver
-    ret = uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(ret));
+    // Install driver
+    if (uart_driver_install(GPS_UART_NUM, 256, 0, 0, NULL, 0) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install UART driver");
         return false;
     }
 
     ESP_LOGI(TAG, "GPS initialized successfully");
-    ESP_LOGI(TAG, "Waiting for GPS fix... (may take 30-60 seconds outdoors)");
-
     return true;
 }
 
-bool GPS::update()
-{
-    uint8_t data[128];
-    int length = uart_read_bytes(UART_NUM, data, sizeof(data) - 1, 10 / portTICK_PERIOD_MS);
+void GPS::read() {
+    uint8_t data;
+    int len = uart_read_bytes(GPS_UART_NUM, &data, 1, 0);
 
-    if (length > 0) {
-        data[length] = '\0';  // Null terminate
+    if (len > 0) {
+        processChar(data);
+    }
+}
 
-        // Process each byte
-        for (int i = 0; i < length; i++) {
-            char c = (char)data[i];
-
-            // Look for start of NMEA sentence
-            if (c == '$') {
-                nmea_index = 0;
-                parsing_sentence = true;
-                nmea_buffer[nmea_index++] = c;
-            }
-            // End of NMEA sentence
-            else if (c == '\n' || c == '\r') {
-                if (parsing_sentence && nmea_index > 0) {
-                    nmea_buffer[nmea_index] = '\0';
-
-                    // Parse the complete sentence
-                    if (parseNMEA(nmea_buffer)) {
-                        last_update_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-                        parsing_sentence = false;
-                        return true;  // New valid data
-                    }
-                    parsing_sentence = false;
-                }
-                nmea_index = 0;
-            }
-            // Add to buffer
-            else if (parsing_sentence && nmea_index < sizeof(nmea_buffer) - 1) {
-                nmea_buffer[nmea_index++] = c;
-            }
+void GPS::processChar(char c) {
+    if (c == '$') {
+        // Start of new sentence
+        line_index = 0;
+        nmea_line[line_index++] = c;
+    }
+    else if (c == '\n' || c == '\r') {
+        // End of sentence
+        if (line_index > 0) {
+            nmea_line[line_index] = '\0';
+            processLine();
+            line_index = 0;
         }
     }
-
-    return false;
+    else if (line_index < sizeof(nmea_line) - 1) {
+        // Add to buffer
+        nmea_line[line_index++] = c;
+    }
 }
 
-bool GPS::parseNMEA(const char* sentence)
-{
-    // Verify checksum
-    if (!verifyChecksum(sentence)) {
-        return false;
+void GPS::processLine() {
+    // Check for GGA (position data) or RMC (minimum data)
+    if (strncmp(nmea_line, "$GNGGA", 6) == 0 || strncmp(nmea_line, "$GPGGA", 6) == 0) {
+        parseGGA(nmea_line);
     }
-
-    // Parse different sentence types
-    // Handle both $GPGGA and $GNGGA (GPS only vs GPS+GLONASS combined)
-    if (strncmp(sentence, "$GPGGA", 6) == 0 ||
-        strncmp(sentence, "$GNGGA", 6) == 0) {
-        return parseGPGGA(sentence);
+    else if (strncmp(nmea_line, "$GNRMC", 6) == 0 || strncmp(nmea_line, "$GPRMC", 6) == 0) {
+        parseRMC(nmea_line);
     }
-    else if (strncmp(sentence, "$GPRMC", 6) == 0 ||
-             strncmp(sentence, "$GNRMC", 6) == 0) {
-        return parseGPRMC(sentence);
-    }
-
-    return false;
+    // We can ignore GSV (satellites in view) for now - GGA gives us count
 }
 
-bool GPS::parseGPGGA(const char* sentence)
-{
-    // $GPGGA,hhmmss.ss,llll.ll,a,yyyyy.yy,a,x,xx,x.x,x.x,M,x.x,M,x.x,xxxx*hh
-    // Example: $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
+bool GPS::parseGGA(const char* line) {
+    // $GNGGA,time,lat,N/S,lon,E/W,fix,sats,hdop,alt,M,,,,,*checksum
+    char temp[100];
+    strncpy(temp, line, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
 
-    char buffer[128];
-    strncpy(buffer, sentence, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
-
-    char* token = strtok(buffer, ",");
+    char* token = strtok(temp, ",");
     int field = 0;
 
-    char lat_str[16] = {0};
-    char lat_hem = 'N';
-    char lon_str[16] = {0};
-    char lon_hem = 'E';
-    int quality = 0;
+    double new_lat = 0, new_lon = 0;
+    char lat_dir = 0, lon_dir = 0;
+    int fix_quality = 0;
 
-    while (token != NULL) {
+    while (token != NULL && field < 15) {
         switch (field) {
             case 2: // Latitude
-                strncpy(lat_str, token, sizeof(lat_str) - 1);
+                if (strlen(token) > 0) {
+                    new_lat = atof(token);
+                }
                 break;
             case 3: // N/S
-                lat_hem = token[0];
+                if (strlen(token) > 0) {
+                    lat_dir = token[0];
+                }
                 break;
             case 4: // Longitude
-                strncpy(lon_str, token, sizeof(lon_str) - 1);
+                if (strlen(token) > 0) {
+                    new_lon = atof(token);
+                }
                 break;
             case 5: // E/W
-                lon_hem = token[0];
+                if (strlen(token) > 0) {
+                    lon_dir = token[0];
+                }
                 break;
-            case 6: // Fix quality (0=invalid, 1=GPS, 2=DGPS)
-                quality = atoi(token);
+            case 6: // Fix quality (0=no fix, 1=GPS, 2=DGPS)
+                fix_quality = atoi(token);
                 break;
             case 7: // Number of satellites
-                satellites = atoi(token);
+                satellite_count = atoi(token);
+                break;
+            case 8: // HDOP
+                if (strlen(token) > 0) {
+                    hdop_value = atof(token);
+                }
                 break;
             case 9: // Altitude
-                altitude_m = atof(token);
+                if (strlen(token) > 0) {
+                    altitude = atof(token);
+                }
                 break;
         }
         token = strtok(NULL, ",");
         field++;
     }
 
-    if (quality > 0 && strlen(lat_str) > 0 && strlen(lon_str) > 0) {
-        current_lat = parseCoordinate(lat_str, lat_hem);
-        current_lon = parseCoordinate(lon_str, lon_hem);
-        fix_valid = true;
-        return true;
+    // Update position if we have a fix
+    if (fix_quality > 0 && new_lat > 0 && new_lon > 0) {
+        latitude = convertNMEAtoDecimal(temp + 7, lat_dir);  // Rough position in string
+        longitude = convertNMEAtoDecimal(temp + 20, lon_dir); // Rough position
+
+        // Actually, let's reparse more carefully
+        char lat_str[20], lon_str[20];
+        sscanf(line, "$%*[^,],%*[^,],%[^,],%c,%[^,],%c",
+               lat_str, &lat_dir, lon_str, &lon_dir);
+
+        if (strlen(lat_str) > 0 && strlen(lon_str) > 0) {
+            latitude = convertNMEAtoDecimal(lat_str, lat_dir);
+            longitude = convertNMEAtoDecimal(lon_str, lon_dir);
+            is_fixed = true;
+            last_fix_time = esp_log_timestamp();
+        }
+    } else {
+        is_fixed = false;
     }
 
-    fix_valid = false;
-    return false;
+    return is_fixed;
 }
 
-bool GPS::parseGPRMC(const char* sentence)
-{
-    // $GPRMC,hhmmss.ss,A,llll.ll,a,yyyyy.yy,a,x.x,x.x,ddmmyy,x.x,a*hh
-    // Example: $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
+bool GPS::parseRMC(const char* line) {
+    // $GNRMC,time,status,lat,N/S,lon,E/W,speed,course,date,,,mode*checksum
+    char temp[100];
+    strncpy(temp, line, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
 
-    char buffer[128];
-    strncpy(buffer, sentence, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
-
-    char* token = strtok(buffer, ",");
+    char* token = strtok(temp, ",");
     int field = 0;
 
     char status = 'V';
-    char lat_str[16] = {0};
-    char lat_hem = 'N';
-    char lon_str[16] = {0};
-    char lon_hem = 'E';
+    double new_lat = 0, new_lon = 0;
+    char lat_dir = 0, lon_dir = 0;
 
-    while (token != NULL) {
+    while (token != NULL && field < 12) {
         switch (field) {
-            case 2: // Status (A=active, V=void)
-                status = token[0];
+            case 2: // Status (A=active/valid, V=void/invalid)
+                if (strlen(token) > 0) {
+                    status = token[0];
+                }
                 break;
             case 3: // Latitude
-                strncpy(lat_str, token, sizeof(lat_str) - 1);
+                if (strlen(token) > 0) {
+                    new_lat = atof(token);
+                }
                 break;
             case 4: // N/S
-                lat_hem = token[0];
+                if (strlen(token) > 0) {
+                    lat_dir = token[0];
+                }
                 break;
             case 5: // Longitude
-                strncpy(lon_str, token, sizeof(lon_str) - 1);
+                if (strlen(token) > 0) {
+                    new_lon = atof(token);
+                }
                 break;
             case 6: // E/W
-                lon_hem = token[0];
-                break;
-            case 7: // Speed in knots
-                speed_kmh = atof(token) * 1.852f;  // Convert knots to km/h
+                if (strlen(token) > 0) {
+                    lon_dir = token[0];
+                }
                 break;
         }
         token = strtok(NULL, ",");
         field++;
     }
 
-    if (status == 'A' && strlen(lat_str) > 0 && strlen(lon_str) > 0) {
-        current_lat = parseCoordinate(lat_str, lat_hem);
-        current_lon = parseCoordinate(lon_str, lon_hem);
-        fix_valid = true;
-        return true;
+    // Update if valid
+    if (status == 'A' && new_lat > 0 && new_lon > 0) {
+        // Re-parse for accurate values
+        char lat_str[20], lon_str[20];
+        sscanf(line, "$%*[^,],%*[^,],%*[^,],%[^,],%c,%[^,],%c",
+               lat_str, &lat_dir, lon_str, &lon_dir);
+
+        if (strlen(lat_str) > 0 && strlen(lon_str) > 0) {
+            latitude = convertNMEAtoDecimal(lat_str, lat_dir);
+            longitude = convertNMEAtoDecimal(lon_str, lon_dir);
+            is_fixed = true;
+            last_fix_time = esp_log_timestamp();
+        }
     }
 
-    return false;
+    return is_fixed;
 }
 
-double GPS::parseCoordinate(const char* token, char hemisphere)
-{
-    if (strlen(token) == 0) return 0.0;
+double GPS::convertNMEAtoDecimal(const char* coord, char dir) {
+    // NMEA format: ddmm.mmmm (latitude) or dddmm.mmmm (longitude)
+    double value = atof(coord);
 
-    // Format: ddmm.mmmm or dddmm.mmmm
-    double coord = atof(token);
+    // Extract degrees
+    int degrees = (int)(value / 100);
 
-    // Extract degrees (everything before last 2 digits before decimal)
-    int degrees = (int)(coord / 100);
+    // Extract minutes
+    double minutes = value - (degrees * 100);
 
-    // Extract minutes (last 2 digits before decimal + everything after)
-    double minutes = coord - (degrees * 100);
-
-    // Convert to decimal degrees
+    // Convert to decimal
     double decimal = degrees + (minutes / 60.0);
 
-    // Apply hemisphere
-    if (hemisphere == 'S' || hemisphere == 'W') {
+    // Apply direction
+    if (dir == 'S' || dir == 'W') {
         decimal = -decimal;
     }
 
     return decimal;
 }
 
-bool GPS::verifyChecksum(const char* sentence)
-{
-    if (sentence[0] != '$') return false;
-
-    // Find the asterisk
-    const char* asterisk = strchr(sentence, '*');
-    if (!asterisk || asterisk == sentence) return false;
-
-    // Calculate checksum (XOR of all characters between $ and *)
-    uint8_t checksum = 0;
-    for (const char* p = sentence + 1; p < asterisk; p++) {
-        checksum ^= *p;
-    }
-
-    // Parse the checksum from the sentence
-    uint8_t expected = 0;
-    if (strlen(asterisk) >= 3) {
-        expected = (parseHex(asterisk[1]) << 4) | parseHex(asterisk[2]);
-    }
-
-    return checksum == expected;
+GPSPacket GPS::getPacket() const {
+    GPSPacket packet;
+    packet.lat = (float)latitude;
+    packet.lon = (float)longitude;
+    packet.altitude = (uint16_t)altitude;
+    packet.satellites = satellite_count;
+    packet.hdop = (uint8_t)(hdop_value * 10); // Scale to fit in byte
+    return packet;
 }
 
-uint8_t GPS::parseHex(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
-}
-
-Location GPS::getLocation()
-{
-    Location loc;
-    loc.lat = current_lat;
-    loc.lon = current_lon;
-    loc.valid = fix_valid;
-    return loc;
-}
-
-bool GPS::isValid()
-{
-    return fix_valid;
-}
-
-uint8_t GPS::getSatellites()
-{
-    return satellites;
-}
-
-float GPS::getSpeedKmh()
-{
-    return speed_kmh;
-}
-
-float GPS::getAltitudeMeters()
-{
-    return altitude_m;
-}
-
-double GPS::degreesToRadians(double degrees)
-{
-    return degrees * M_PI / 180.0;
-}
-
-int GPS::calculateDistance(double lat1, double lon1, double lat2, double lon2)
-{
+uint32_t GPS::calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     // Haversine formula
-    double lat1_rad = degreesToRadians(lat1);
-    double lon1_rad = degreesToRadians(lon1);
-    double lat2_rad = degreesToRadians(lat2);
-    double lon2_rad = degreesToRadians(lon2);
+    const double R = 6371000; // Earth radius in meters
 
-    double dlat = lat2_rad - lat1_rad;
-    double dlon = lon2_rad - lon1_rad;
+    double lat1_rad = lat1 * M_PI / 180.0;
+    double lat2_rad = lat2 * M_PI / 180.0;
+    double delta_lat = (lat2 - lat1) * M_PI / 180.0;
+    double delta_lon = (lon2 - lon1) * M_PI / 180.0;
 
-    double a = sin(dlat / 2.0) * sin(dlat / 2.0) +
+    double a = sin(delta_lat/2) * sin(delta_lat/2) +
                cos(lat1_rad) * cos(lat2_rad) *
-               sin(dlon / 2.0) * sin(dlon / 2.0);
+               sin(delta_lon/2) * sin(delta_lon/2);
 
-    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
 
-    // Distance in meters
-    double distance = EARTH_RADIUS_KM * c * 1000.0;
-
-    return (int)distance;
+    return (uint32_t)(R * c);
 }
 
-int GPS::calculateBearing(double lat1, double lon1, double lat2, double lon2)
-{
-    // Calculate bearing from point 1 to point 2
-    double lat1_rad = degreesToRadians(lat1);
-    double lon1_rad = degreesToRadians(lon1);
-    double lat2_rad = degreesToRadians(lat2);
-    double lon2_rad = degreesToRadians(lon2);
+uint16_t GPS::calculateHeading(double lat1, double lon1, double lat2, double lon2) {
+    double lat1_rad = lat1 * M_PI / 180.0;
+    double lat2_rad = lat2 * M_PI / 180.0;
+    double delta_lon = (lon2 - lon1) * M_PI / 180.0;
 
-    double dlon = lon2_rad - lon1_rad;
-
-    double y = sin(dlon) * cos(lat2_rad);
+    double y = sin(delta_lon) * cos(lat2_rad);
     double x = cos(lat1_rad) * sin(lat2_rad) -
-               sin(lat1_rad) * cos(lat2_rad) * cos(dlon);
+               sin(lat1_rad) * cos(lat2_rad) * cos(delta_lon);
 
-    double bearing = atan2(y, x);
-
-    // Convert to degrees
-    bearing = bearing * 180.0 / M_PI;
+    double heading = atan2(y, x) * 180.0 / M_PI;
 
     // Normalize to 0-359
-    bearing = fmod(bearing + 360.0, 360.0);
+    heading = fmod(heading + 360.0, 360.0);
 
-    return (int)bearing;
+    return (uint16_t)heading;
 }
 
-int GPS::distanceTo(double target_lat, double target_lon)
-{
-    if (!fix_valid) return -1;
-    return calculateDistance(current_lat, current_lon, target_lat, target_lon);
-}
-
-int GPS::bearingTo(double target_lat, double target_lon)
-{
-    if (!fix_valid) return -1;
-    return calculateBearing(current_lat, current_lon, target_lat, target_lon);
-}
-
-void GPS::displayInfo()
-{
-    if (fix_valid) {
-        ESP_LOGI(TAG, "Location: %.6f, %.6f | Sats: %d | Speed: %.1f km/h | Alt: %.1f m",
-                current_lat, current_lon, satellites, speed_kmh, altitude_m);
+void GPS::printStatus() const {
+    if (is_fixed) {
+        ESP_LOGI(TAG, "GPS FIX | Lat: %.6f | Lon: %.6f | Sats: %d | HDOP: %.1f | Alt: %.0fm",
+                 latitude, longitude, satellite_count, hdop_value, altitude);
     } else {
-        ESP_LOGI(TAG, "GPS: No fix yet (Satellites: %d)", satellites);
+        ESP_LOGI(TAG, "NO FIX | Satellites: %d | HDOP: %.1f",
+                 satellite_count, hdop_value);
     }
 }
+
