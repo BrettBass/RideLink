@@ -104,149 +104,95 @@ void GPS::processLine() {
     else if (strncmp(nmea_line, "$GNRMC", 6) == 0 || strncmp(nmea_line, "$GPRMC", 6) == 0) {
         parseRMC(nmea_line);
     }
-    // We can ignore GSV (satellites in view) for now - GGA gives us count
+    // ignore GSV (satellites in view) for now - GGA gives us count
 }
 
 bool GPS::parseGGA(const char* line) {
-    // $GNGGA,time,lat,N/S,lon,E/W,fix,sats,hdop,alt,M,,,,,*checksum
-    char temp[100];
-    strncpy(temp, line, sizeof(temp) - 1);
-    temp[sizeof(temp) - 1] = '\0';
+    // Parse coordinates and directions directly
+    char lat_str[20], lon_str[20];
+    char lat_dir, lon_dir;
+    int fix_quality;
+    int num_sats;
+    float hdop, alt;
 
-    char* token = strtok(temp, ",");
-    int field = 0;
+    int parsed = sscanf(line,
+        "$"           // '$' character at start
+        "%*[^,]"      // Skip sentence ID (GNGGA/GPGGA) - match everything until comma, don't store (*)
+        ","           // comma
+        "%*[^,]"      // Skip UTC time field - match until comma, don't store
+        ","           // comma
+        "%[^,]"       // Capture latitude string (everything until comma)
+        ","           // comma
+        "%c"          // Capture char lat_dir (N/S)
+        ","           // comma
+        "%[^,]"       // Capture longitude string (everything until comma)
+        ","           // comma
+        "%c"          // Capture char lon_dir (E/W)
+        ","           // comma
+        "%d"          // Capture int fix_quality
+        ","           // comma
+        "%d"          // Capture int num_sats
+        ","           // comma
+        "%f"          // Capture float hdop
+        ","           // comma
+        "%f",         // Capture float alt
+        lat_str, &lat_dir, lon_str, &lon_dir,
+        &fix_quality, &num_sats, &hdop, &alt);
 
-    double new_lat = 0, new_lon = 0;
-    char lat_dir = 0, lon_dir = 0;
-    int fix_quality = 0;
+    if (parsed == 8) // all values parsed
+    {
+        satellite_count = num_sats;
+        hdop_value = hdop;
+        altitude = alt;
 
-    while (token != NULL && field < 15) {
-        switch (field) {
-            case 2: // Latitude
-                if (strlen(token) > 0) {
-                    new_lat = atof(token);
-                }
-                break;
-            case 3: // N/S
-                if (strlen(token) > 0) {
-                    lat_dir = token[0];
-                }
-                break;
-            case 4: // Longitude
-                if (strlen(token) > 0) {
-                    new_lon = atof(token);
-                }
-                break;
-            case 5: // E/W
-                if (strlen(token) > 0) {
-                    lon_dir = token[0];
-                }
-                break;
-            case 6: // Fix quality (0=no fix, 1=GPS, 2=DGPS)
-                fix_quality = atoi(token);
-                break;
-            case 7: // Number of satellites
-                satellite_count = atoi(token);
-                break;
-            case 8: // HDOP
-                if (strlen(token) > 0) {
-                    hdop_value = atof(token);
-                }
-                break;
-            case 9: // Altitude
-                if (strlen(token) > 0) {
-                    altitude = atof(token);
-                }
-                break;
-        }
-        token = strtok(NULL, ",");
-        field++;
-    }
-
-    // Update position if we have a fix
-    if (fix_quality > 0 && new_lat > 0 && new_lon > 0) {
-        latitude = convertNMEAtoDecimal(temp + 7, lat_dir);  // Rough position in string
-        longitude = convertNMEAtoDecimal(temp + 20, lon_dir); // Rough position
-
-        // Actually, let's reparse more carefully
-        char lat_str[20], lon_str[20];
-        sscanf(line, "$%*[^,],%*[^,],%[^,],%c,%[^,],%c",
-               lat_str, &lat_dir, lon_str, &lon_dir);
-
-        if (strlen(lat_str) > 0 && strlen(lon_str) > 0) {
+        if (fix_quality > 0 && strlen(lat_str) > 0 && strlen(lon_str) > 0) {
             latitude = convertNMEAtoDecimal(lat_str, lat_dir);
             longitude = convertNMEAtoDecimal(lon_str, lon_dir);
             is_fixed = true;
             last_fix_time = esp_log_timestamp();
+            return true;
         }
-    } else {
-        is_fixed = false;
     }
 
-    return is_fixed;
+    is_fixed = false;
+    return false;
 }
 
 bool GPS::parseRMC(const char* line) {
     // $GNRMC,time,status,lat,N/S,lon,E/W,speed,course,date,,,mode*checksum
-    char temp[100];
-    strncpy(temp, line, sizeof(temp) - 1);
-    temp[sizeof(temp) - 1] = '\0';
 
-    char* token = strtok(temp, ",");
-    int field = 0;
+    char status;
+    char lat_str[20], lon_str[20];
+    char lat_dir, lon_dir;
 
-    char status = 'V';
-    double new_lat = 0, new_lon = 0;
-    char lat_dir = 0, lon_dir = 0;
+    int parsed = sscanf(line,
+        "$"           // '$' at start
+        "%*[^,]"      // Skip sentence ID (GNRMC/GPRMC)
+        ","           // comma
+        "%*[^,]"      // Skip UTC time
+        ","           // comma
+        "%c"          // Capture status character (A/V)
+        ","           // comma
+        "%[^,]"       // Capture latitude string
+        ","           // comma
+        "%c"          // Capture lat_dir (N/S)
+        ","           // comma
+        "%[^,]"       // Capture longitude string
+        ","           // comma
+        "%c",         // Capture lon_dir (E/W)
+        &status, lat_str, &lat_dir, lon_str, &lon_dir);
 
-    while (token != NULL && field < 12) {
-        switch (field) {
-            case 2: // Status (A=active/valid, V=void/invalid)
-                if (strlen(token) > 0) {
-                    status = token[0];
-                }
-                break;
-            case 3: // Latitude
-                if (strlen(token) > 0) {
-                    new_lat = atof(token);
-                }
-                break;
-            case 4: // N/S
-                if (strlen(token) > 0) {
-                    lat_dir = token[0];
-                }
-                break;
-            case 5: // Longitude
-                if (strlen(token) > 0) {
-                    new_lon = atof(token);
-                }
-                break;
-            case 6: // E/W
-                if (strlen(token) > 0) {
-                    lon_dir = token[0];
-                }
-                break;
-        }
-        token = strtok(NULL, ",");
-        field++;
+    // Update if status is valid (A = active)
+    if (parsed == 5 && status == 'A' && strlen(lat_str) > 0 && strlen(lon_str) > 0) {
+        latitude = convertNMEAtoDecimal(lat_str, lat_dir);
+        longitude = convertNMEAtoDecimal(lon_str, lon_dir);
+        is_fixed = true;
+        last_fix_time = esp_log_timestamp();
+        return true;
     }
 
-    // Update if valid
-    if (status == 'A' && new_lat > 0 && new_lon > 0) {
-        // Re-parse for accurate values
-        char lat_str[20], lon_str[20];
-        sscanf(line, "$%*[^,],%*[^,],%*[^,],%[^,],%c,%[^,],%c",
-               lat_str, &lat_dir, lon_str, &lon_dir);
-
-        if (strlen(lat_str) > 0 && strlen(lon_str) > 0) {
-            latitude = convertNMEAtoDecimal(lat_str, lat_dir);
-            longitude = convertNMEAtoDecimal(lon_str, lon_dir);
-            is_fixed = true;
-            last_fix_time = esp_log_timestamp();
-        }
-    }
-
-    return is_fixed;
+    is_fixed = false;
+    return false;
 }
 
 double GPS::convertNMEAtoDecimal(const char* coord, char dir) {
