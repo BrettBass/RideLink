@@ -10,8 +10,8 @@
 static const char* TAG = "GPS";
 
 // ESP32 UART2 pins - can be any GPIO
-#define GPS_TX_PIN GPIO_NUM_26  // TX2 (GPS RX connects here)
-#define GPS_RX_PIN GPIO_NUM_25  // RX2 (GPS TX connects here)
+#define GPS_TX_PIN GPIO_NUM_17  // TX2 (GPS RX connects here)
+#define GPS_RX_PIN GPIO_NUM_16  // RX2 (GPS TX connects here)
 #define GPS_UART_NUM UART_NUM_2
 #define GPS_BAUD_RATE 9600
 
@@ -97,6 +97,7 @@ void GPS::processChar(char c) {
 }
 
 void GPS::processLine() {
+
     // Check for GGA (position data) or RMC (minimum data)
     if (strncmp(nmea_line, "$GNGGA", 6) == 0 || strncmp(nmea_line, "$GPGGA", 6) == 0) {
         parseGGA(nmea_line);
