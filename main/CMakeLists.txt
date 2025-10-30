@@ -5,12 +5,15 @@ idf_component_register(
         "../src/GPS.cpp"
         "../src/LoRa.cpp"
         "../src/Compass.cpp"
+        "../src/CompassCalibrator.cpp"
     INCLUDE_DIRS
         "../include"
     REQUIRES
         driver
         esp_lcd
         freertos
+        nvs_flash
     PRIV_REQUIRES
         spi_flash
+        nvs_flash
 )

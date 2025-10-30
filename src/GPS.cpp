@@ -264,8 +264,8 @@ uint16_t GPS::calculateHeading(double lat1, double lon1, double lat2, double lon
 
 void GPS::printStatus() const {
     if (is_fixed) {
-        ESP_LOGI(TAG, "GPS FIX | Lat: %.6f | Lon: %.6f | Sats: %d | HDOP: %.1f | Alt: %.0fm",
-                 latitude, longitude, satellite_count, hdop_value, altitude);
+        //ESP_LOGI(TAG, "GPS FIX | Lat: %.6f | Lon: %.6f | Sats: %d | HDOP: %.1f | Alt: %.0fm",
+        //         latitude, longitude, satellite_count, hdop_value, altitude);
     } else {
         ESP_LOGI(TAG, "NO FIX | Satellites: %d | HDOP: %.1f",
                  satellite_count, hdop_value);

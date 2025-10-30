@@ -546,7 +546,8 @@ void Display::updateArrow(int16_t angle, uint16_t color)
     int16_t arrowLength = 80;
     int16_t arrowWidth = 8;
 
-    if (hasLastArrow && abs(angle - lastArrowAngle) < 5) {
+    // Reduce threshold to 2° for more responsive updates
+    if (hasLastArrow && abs(angle - lastArrowAngle) < 2) {
         return;
     }
 
@@ -596,6 +597,42 @@ void Display::fillCircle(int16_t x0, int16_t y0, int16_t r, uint16_t color)
     }
 }
 
+void Display::drawCircle(int16_t x0, int16_t y0, int16_t r, uint16_t color)
+{
+    int16_t x = 0;
+    int16_t y = r;
+    int16_t d = 1 - r;
+
+    while (x <= y) {
+        // Draw points for each octant
+        drawPixel(x0 + x, y0 + y, color);
+        drawPixel(x0 - x, y0 + y, color);
+        drawPixel(x0 + x, y0 - y, color);
+        drawPixel(x0 - x, y0 - y, color);
+        drawPixel(x0 + y, y0 + x, color);
+        drawPixel(x0 - y, y0 + x, color);
+        drawPixel(x0 + y, y0 - x, color);
+        drawPixel(x0 - y, y0 - x, color);
+
+        x++;
+        if (d < 0) {
+            d += 2 * x + 1;
+        } else {
+            y--;
+            d += 2 * (x - y) + 1;
+        }
+    }
+}
+
+void Display::drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color)
+{
+    // Draw four lines to create rectangle
+    drawLine(x, y, x + w - 1, y, color);         // Top
+    drawLine(x, y + h - 1, x + w - 1, y + h - 1, color); // Bottom
+    drawLine(x, y, x, y + h - 1, color);         // Left
+    drawLine(x + w - 1, y, x + w - 1, y + h - 1, color); // Right
+}
+
 void Display::turnOn()
 {
     if (panel_handle) {
@@ -630,4 +667,3 @@ void Display::swapInt16(int16_t &a, int16_t &b)
     a = b;
     b = t;
 }
-
