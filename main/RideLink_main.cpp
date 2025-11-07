@@ -7,6 +7,7 @@
 #include "Compass.hpp"
 #include "Display.hpp"
 #include "CompassCalibrator.hpp"
+#include "LoRa.hpp"
 
 static const char* TAG = "MAIN";
 
@@ -14,15 +15,26 @@ static const char* TAG = "MAIN";
 #define BUTTON_GPIO GPIO_NUM_0
 #define BUTTON_HOLD_TIME_MS 3000  // Hold for 3 seconds to enter calibration
 
-// GPS, Compass, Display, and Calibrator instances
+// Device configuration
+#define THIS_DEVICE_ID 1  // Change to 2 for the second device
+#define LORA_FREQUENCY 915.0  // 915 MHz for US, 868 MHz for EU
+
+// GPS, Compass, Display, LoRa, and Calibrator instances
 GPS gps;
 Compass compass;
 Display display;
+LoRa lora;
 CompassCalibrator* calibrator = nullptr;
+
+// Peer device data
+RideLinkPacket peer_packet;
+bool peer_found = false;
+uint32_t last_peer_time = 0;
 
 // Task handles
 TaskHandle_t gps_task_handle = NULL;
 TaskHandle_t compass_task_handle = NULL;
+TaskHandle_t lora_task_handle = NULL;
 
 // Calibration state
 bool calibration_mode = false;
@@ -100,6 +112,81 @@ void gps_task(void* param) {
     vTaskDelete(NULL);
 }
 
+// Task to handle LoRa communication
+void lora_task(void* param) {
+    uint32_t last_broadcast = 0;
+    const uint32_t BROADCAST_INTERVAL = 2000;  // Send location every 2 seconds
+
+    // Put LoRa in receive mode
+    lora.receive();
+
+    while (!calibration_mode) {
+        uint32_t now = esp_log_timestamp();
+
+        // Send our location periodically if we have GPS fix
+        if (now - last_broadcast >= BROADCAST_INTERVAL) {
+            last_broadcast = now;
+
+            if (gps.isFixed()) {
+                GPSPacket gps_data = gps.getPacket();
+                float heading = compass.getHeading();
+
+                if (lora.broadcastLocation(gps_data, (int16_t)heading)) {
+                    ESP_LOGI(TAG, "Broadcast location: %.6f, %.6f | Heading: %.0f°",
+                             gps_data.lat, gps_data.lon, heading);
+                } else {
+                    ESP_LOGE(TAG, "Failed to broadcast location");
+                }
+
+                // Go back to receive mode
+                lora.receive();
+            }
+        }
+
+        // Check for incoming packets
+        if (lora.available()) {
+            RideLinkPacket packet;
+            if (lora.receivePacket(packet, 0)) {
+                // Ignore our own packets
+                if (packet.device_id != THIS_DEVICE_ID) {
+                    peer_packet = packet;
+                    peer_found = true;
+                    last_peer_time = now;
+
+                    ESP_LOGI(TAG, "=== PEER FOUND ===");
+                    ESP_LOGI(TAG, "Device ID: %d", packet.device_id);
+                    ESP_LOGI(TAG, "Location: %.6f, %.6f", packet.gps.lat, packet.gps.lon);
+                    ESP_LOGI(TAG, "Heading: %d°", packet.compass_heading);
+                    ESP_LOGI(TAG, "RSSI: %d dBm", packet.rssi);
+                    ESP_LOGI(TAG, "Battery: %d%%", packet.battery_level);
+
+                    // Calculate distance if we have GPS fix
+                    if (gps.isFixed()) {
+                        uint32_t distance = GPS::calculateDistance(
+                            gps.getLatitude(), gps.getLongitude(),
+                            packet.gps.lat, packet.gps.lon
+                        );
+                        ESP_LOGI(TAG, "Distance: %lu meters", (unsigned long)distance);
+                    }
+                }
+            }
+
+            // Back to receive mode
+            lora.receive();
+        }
+
+        // Check if peer connection lost (no packet for 10 seconds)
+        if (peer_found && (now - last_peer_time > 10000)) {
+            ESP_LOGW(TAG, "Lost connection to peer device");
+            peer_found = false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    vTaskDelete(NULL);
+}
+
 // Task to read compass and display arrow
 void compass_task(void* param) {
     uint32_t last_display = 0;
@@ -141,22 +228,71 @@ void compass_task(void* param) {
             while (heading < 0) heading += 360;
             while (heading >= 360) heading -= 360;
 
-            // Calculate arrow angle (arrow points north)
-            // If heading is 90° (facing east), arrow should point 270° (left) to show north
-            int16_t arrow_angle = (int16_t)(360 - heading);
+            // Calculate arrow angle based on target
+            int16_t arrow_angle = 0;
+            uint16_t arrow_color = Color::GRAY;  // Gray when no target
+            const char* mode_text = "NO TARGET";
+            uint32_t distance_m = 0;
+
+            if (peer_found) {
+                // We have a peer device - point to it
+                if (gps.isFixed()) {
+                    // Both devices have GPS - calculate precise bearing
+                    double my_lat = gps.getLatitude();
+                    double my_lon = gps.getLongitude();
+
+                    // Calculate bearing from current position to peer
+                    uint16_t bearing_to_peer = GPS::calculateHeading(
+                        my_lat, my_lon,
+                        peer_packet.gps.lat, peer_packet.gps.lon
+                    );
+
+                    // Calculate distance to peer
+                    distance_m = GPS::calculateDistance(
+                        my_lat, my_lon,
+                        peer_packet.gps.lat, peer_packet.gps.lon
+                    );
+
+                    // Calculate arrow angle (accounting for display inversion)
+                    float arrow_angle_f = (360.0f - heading) + (float)bearing_to_peer;
+
+                    // Normalize to 0-359
+                    while (arrow_angle_f >= 360) arrow_angle_f -= 360;
+                    while (arrow_angle_f < 0) arrow_angle_f += 360;
+
+                    arrow_angle = (int16_t)arrow_angle_f;
+                    arrow_color = Color::GREEN;  // Green for peer tracking
+                    mode_text = "PEER FOUND";
+                } else {
+                    // No GPS fix - can't calculate bearing to peer
+                    arrow_angle = (int16_t)(360 - heading);  // Just show north
+                    arrow_color = Color::YELLOW;  // Yellow - peer found but no GPS
+                    mode_text = "PEER (NO GPS)";
+                }
+            } else if (gps.isFixed()) {
+                // No peer but have GPS - point north
+                arrow_angle = (int16_t)(360 - heading);
+                arrow_color = Color::CYAN;  // Cyan for north with GPS
+                mode_text = "NORTH";
+            } else {
+                // No peer, no GPS - just show magnetic north
+                arrow_angle = (int16_t)(360 - heading);
+                arrow_color = Color::GRAY;  // Gray for basic compass
+                mode_text = "MAG NORTH";
+            }
 
             // Update arrow on display
-            display.updateArrow(arrow_angle, Color::GREEN);
+            display.updateArrow(arrow_angle, arrow_color);
 
-            // Draw additional UI elements
-            // Show GPS status indicator
+            // Draw status indicators
+            // GPS status (top-right)
             if (gps.isFixed()) {
                 display.fillCircle(220, 20, 5, Color::GREEN);
             } else {
                 display.drawCircle(220, 20, 5, Color::RED);
             }
 
-            // Show calibration status indicator
+            // Calibration status (top-left)
             if (calibrator && calibrator->getCalibrationData().isValid()) {
                 float coverage = calibrator->getCalibrationData().coverage_score;
                 uint16_t cal_color = Color::RED;
@@ -167,16 +303,34 @@ void compass_task(void* param) {
                 display.drawCircle(20, 20, 5, Color::GRAY);
             }
 
+            // Peer connection status (center-top)
+            if (peer_found) {
+                display.fillCircle(120, 20, 5, Color::GREEN);
+                // Show distance if available
+                if (distance_m > 0) {
+                    // Display distance (you'd need to add text rendering for this)
+                    // For now, use circle size to indicate distance
+                    int radius = 3;
+                    if (distance_m < 100) radius = 8;
+                    else if (distance_m < 500) radius = 6;
+                    else if (distance_m < 1000) radius = 4;
+                    display.fillCircle(120, 35, radius, Color::BLUE);
+                }
+            } else {
+                display.drawCircle(120, 20, 5, Color::RED);
+            }
+
             // Log every second with values
             if (now - last_display >= 1000) {
                 last_display = now;
                 if (read_success) {
-                    ESP_LOGI(TAG, "Heading: %.1f° | Arrow: %d° | GPS: %s | Cal: %s",
-                             heading, arrow_angle,
-                             gps.isFixed() ? "FIX" : "NO FIX",
-                             (calibrator && calibrator->getCalibrationData().isValid()) ? "YES" : "NO");
-                } else {
-                    ESP_LOGE(TAG, "Failed to read compass!");
+                    if (peer_found && gps.isFixed()) {
+                        ESP_LOGI(TAG, "Mode: %s | Heading: %.1f° | Bearing: %d° | Distance: %lu m | RSSI: %d dBm",
+                                 mode_text, heading, arrow_angle, (unsigned long)distance_m, peer_packet.rssi);
+                    } else {
+                        ESP_LOGI(TAG, "Mode: %s | Heading: %.1f° | Arrow: %d°",
+                                 mode_text, heading, arrow_angle);
+                    }
                 }
             }
         }
@@ -249,8 +403,8 @@ void runCalibrationMode() {
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "=================================");
-    ESP_LOGI(TAG, "    RideLink - GPS + Compass");
-    ESP_LOGI(TAG, "    With Smart Calibration");
+    ESP_LOGI(TAG, "    RideLink - Peer Locator");
+    ESP_LOGI(TAG, "    Device ID: %d", THIS_DEVICE_ID);
     ESP_LOGI(TAG, "=================================");
     ESP_LOGI(TAG, "");
 
@@ -293,6 +447,23 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "✓ Compass initialized successfully");
     ESP_LOGI(TAG, "");
 
+    // Initialize LoRa
+    ESP_LOGI(TAG, "Initializing LoRa...");
+    lora.setDeviceId(THIS_DEVICE_ID);
+    if (!lora.begin(LORA_FREQUENCY)) {
+        ESP_LOGE(TAG, "Failed to initialize LoRa!");
+        ESP_LOGE(TAG, "Check wiring:");
+        ESP_LOGE(TAG, "  MISO -> GPIO19");
+        ESP_LOGE(TAG, "  MOSI -> GPIO23");
+        ESP_LOGE(TAG, "  SCK  -> GPIO18");
+        ESP_LOGE(TAG, "  NSS  -> GPIO32");
+        ESP_LOGE(TAG, "  RST  -> GPIO12");
+        ESP_LOGE(TAG, "  DIO0 -> GPIO2");
+        return;
+    }
+    ESP_LOGI(TAG, "✓ LoRa initialized successfully");
+    ESP_LOGI(TAG, "");
+
     // Initialize Calibrator
     ESP_LOGI(TAG, "Initializing Calibration System...");
     calibrator = new CompassCalibrator(compass, display);
@@ -333,22 +504,29 @@ extern "C" void app_main(void) {
 
     // Instructions
     ESP_LOGI(TAG, "==============================================");
-    ESP_LOGI(TAG, "INSTRUCTIONS:");
+    ESP_LOGI(TAG, "RIDELINK PEER LOCATOR - INSTRUCTIONS:");
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "NORMAL MODE:");
-    ESP_LOGI(TAG, "  - Green arrow points to magnetic north");
-    ESP_LOGI(TAG, "  - Top-right dot: GPS status (green=fix, red=no fix)");
+    ESP_LOGI(TAG, "DEVICE ID: %d", THIS_DEVICE_ID);
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "ARROW COLORS:");
+    ESP_LOGI(TAG, "  - GREEN: Pointing to peer device");
+    ESP_LOGI(TAG, "  - YELLOW: Peer found but no GPS fix");
+    ESP_LOGI(TAG, "  - CYAN: Pointing north (GPS fix, no peer)");
+    ESP_LOGI(TAG, "  - GRAY: Magnetic north (no GPS, no peer)");
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "STATUS INDICATORS:");
+    ESP_LOGI(TAG, "  - Top-right dot: GPS (green=fix, red=no fix)");
+    ESP_LOGI(TAG, "  - Top-center dot: Peer (green=connected, red=searching)");
     ESP_LOGI(TAG, "  - Top-left dot: Calibration quality");
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "FEATURES:");
+    ESP_LOGI(TAG, "  - Automatically finds and tracks peer device");
+    ESP_LOGI(TAG, "  - Shows distance when both have GPS fix");
+    ESP_LOGI(TAG, "  - Signal strength indicator (RSSI)");
+    ESP_LOGI(TAG, "  - Battery level sharing");
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "CALIBRATION:");
     ESP_LOGI(TAG, "  - Hold BOOT button for 3 seconds");
-    ESP_LOGI(TAG, "  - Follow on-screen instructions");
-    ESP_LOGI(TAG, "  - Calibration is saved permanently");
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "CALIBRATION MENU:");
-    ESP_LOGI(TAG, "  - Quick press: Magnetometer calibration");
-    ESP_LOGI(TAG, "  - Hold 1 sec: Heading calibration");
-    ESP_LOGI(TAG, "  - Hold 5 sec: Clear calibration");
     ESP_LOGI(TAG, "==============================================");
     ESP_LOGI(TAG, "");
 
@@ -362,8 +540,18 @@ extern "C" void app_main(void) {
             if (compass_task_handle == NULL) {
                 xTaskCreate(compass_task, "compass_task", 4096, NULL, 5, &compass_task_handle);
             }
+            if (lora_task_handle == NULL) {
+                xTaskCreate(lora_task, "lora_task", 4096, NULL, 5, &lora_task_handle);
+            }
 
             vTaskDelay(pdMS_TO_TICKS(1000));
+
+            // Print LoRa status every 30 seconds
+            static uint32_t last_status = 0;
+            if (esp_log_timestamp() - last_status > 30000) {
+                last_status = esp_log_timestamp();
+                lora.printStatus();
+            }
         } else {
             // Stop tasks for calibration
             if (gps_task_handle != NULL) {
@@ -373,6 +561,10 @@ extern "C" void app_main(void) {
             if (compass_task_handle != NULL) {
                 vTaskDelete(compass_task_handle);
                 compass_task_handle = NULL;
+            }
+            if (lora_task_handle != NULL) {
+                vTaskDelete(lora_task_handle);
+                lora_task_handle = NULL;
             }
 
             // Run calibration
