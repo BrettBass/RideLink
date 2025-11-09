@@ -4,6 +4,8 @@
 #include <cstdint>
 
 // Compact GPS packet for LoRa transmission
+// Pack the structure to avoid padding issues
+#pragma pack(push, 1)
 struct GPSPacket {
     float lat;           // 4 bytes
     float lon;           // 4 bytes
@@ -14,6 +16,7 @@ struct GPSPacket {
 
     GPSPacket() : lat(0), lon(0), altitude(0), satellites(0), hdop(255) {}
 };
+#pragma pack(pop)
 
 class GPS {
 public:
@@ -69,4 +72,3 @@ private:
 };
 
 #endif // GPS_HPP
-
