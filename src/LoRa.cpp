@@ -18,7 +18,7 @@ LoRa::~LoRa() {
 
 bool LoRa::begin(float frequency) {
     ESP_LOGI(TAG, "Initializing LoRa module at %.1f MHz", frequency);
-
+    
     // Configure SPI bus
     spi_bus_config_t buscfg = {
         .mosi_io_num = LORA_MOSI_PIN,
@@ -30,14 +30,14 @@ bool LoRa::begin(float frequency) {
         .flags = 0,
         .intr_flags = 0
     };
-
+    
     // Initialize SPI bus
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {  // Bus might already be initialized
         ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
         return false;
     }
-
+    
     // Configure SPI device
     spi_device_interface_config_t devcfg = {
         .command_bits = 0,
@@ -55,16 +55,16 @@ bool LoRa::begin(float frequency) {
         .pre_cb = nullptr,
         .post_cb = nullptr
     };
-
+    
     ret = spi_bus_add_device(SPI2_HOST, &devcfg, &spi);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add SPI device: %s", esp_err_to_name(ret));
         return false;
     }
-
+    
     // Configure GPIO pins
     gpio_config_t io_conf = {};
-
+    
     // Reset pin
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
@@ -72,17 +72,17 @@ bool LoRa::begin(float frequency) {
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     gpio_config(&io_conf);
-
+    
     // DIO0 pin (interrupt)
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << LORA_DIO0_PIN);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io_conf);
-
+    
     // Reset the module
     reset();
-
+    
     // Check version
     uint8_t version = readRegister(REG_VERSION);
     if (version != 0x12) {
@@ -92,42 +92,48 @@ bool LoRa::begin(float frequency) {
         return false;
     }
     ESP_LOGI(TAG, "✓ SX1278 detected (version 0x%02X)", version);
-
+    
     // Put in sleep mode
     sleep();
-
+    
     // Set frequency
     setFrequency(frequency);
-
+    
     // Set base addresses
     writeRegister(REG_FIFO_TX_BASE_ADDR, 0);
     writeRegister(REG_FIFO_RX_BASE_ADDR, 0);
-
+    
     // Set LNA boost
     writeRegister(REG_LNA, readRegister(REG_LNA) | 0x03);
-
+    
     // Set auto AGC
     writeRegister(REG_MODEM_CONFIG_3, 0x04);
-
+    
     // Set output power to 17 dBm
     setTxPower(17);
-
+    
     // Put in standby mode
     idle();
-
+    
     // Configure for default LoRa settings
-    setSpreadingFactor(7);      // SF7 for good balance
+    // Using higher spreading factor for better sensitivity
+    setSpreadingFactor(9);      // SF9 for better range/sensitivity
     setBandwidth(125000);        // 125 kHz
     setCodingRate(5);           // 4/5
-    setSyncWord(0x34);          // Private network
+    setSyncWord(0x12);          // Changed to 0x12 (more standard)
     enableCrc();
-
+    
+    // Set preamble length
+    writeRegister(REG_PREAMBLE_MSB, 0x00);
+    writeRegister(REG_PREAMBLE_LSB, 0x08);
+    
     ESP_LOGI(TAG, "✓ LoRa initialized successfully");
     ESP_LOGI(TAG, "  Frequency: %.1f MHz", frequency);
-    ESP_LOGI(TAG, "  Spreading Factor: 7");
+    ESP_LOGI(TAG, "  Spreading Factor: 9");
     ESP_LOGI(TAG, "  Bandwidth: 125 kHz");
     ESP_LOGI(TAG, "  TX Power: 17 dBm");
-
+    ESP_LOGI(TAG, "  Sync Word: 0x12");
+    
     return true;
 }
 
@@ -140,19 +146,19 @@ void LoRa::reset() {
 
 uint8_t LoRa::singleTransfer(uint8_t address, uint8_t value) {
     uint8_t response;
-
+    
     spi_transaction_t t = {};
     t.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
     t.length = 16;  // 2 bytes * 8 bits
     t.tx_data[0] = address;
     t.tx_data[1] = value;
-
+    
     esp_err_t ret = spi_device_polling_transmit(spi, &t);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI transfer failed: %s", esp_err_to_name(ret));
         return 0;
     }
-
+    
     response = t.rx_data[1];
     return response;
 }
@@ -171,7 +177,7 @@ void LoRa::setMode(uint8_t mode) {
 
 void LoRa::setFrequency(float frequency) {
     uint64_t frf = ((uint64_t)frequency * 1000000) * 524288 / 32000000;
-
+    
     writeRegister(REG_FRF_MSB, (uint8_t)(frf >> 16));
     writeRegister(REG_FRF_MID, (uint8_t)(frf >> 8));
     writeRegister(REG_FRF_LSB, (uint8_t)(frf >> 0));
@@ -180,7 +186,7 @@ void LoRa::setFrequency(float frequency) {
 void LoRa::setSpreadingFactor(uint8_t sf) {
     if (sf < 6) sf = 6;
     else if (sf > 12) sf = 12;
-
+    
     if (sf == 6) {
         writeRegister(REG_DETECTION_OPTIMIZE, 0xc5);
         writeRegister(REG_DETECTION_THRESHOLD, 0x0c);
@@ -188,17 +194,17 @@ void LoRa::setSpreadingFactor(uint8_t sf) {
         writeRegister(REG_DETECTION_OPTIMIZE, 0xc3);
         writeRegister(REG_DETECTION_THRESHOLD, 0x0a);
     }
-
+    
     uint8_t config2 = readRegister(REG_MODEM_CONFIG_2);
     config2 = (config2 & 0x0F) | ((sf << 4) & 0xF0);
     writeRegister(REG_MODEM_CONFIG_2, config2);
-
+    
     setLdoFlag();
 }
 
 void LoRa::setBandwidth(uint32_t bw) {
     uint8_t bw_val;
-
+    
     if (bw <= 7800) bw_val = 0;
     else if (bw <= 10400) bw_val = 1;
     else if (bw <= 15600) bw_val = 2;
@@ -209,20 +215,20 @@ void LoRa::setBandwidth(uint32_t bw) {
     else if (bw <= 125000) bw_val = 7;
     else if (bw <= 250000) bw_val = 8;
     else bw_val = 9;
-
+    
     uint8_t config1 = readRegister(REG_MODEM_CONFIG_1);
     config1 = (config1 & 0x0F) | (bw_val << 4);
     writeRegister(REG_MODEM_CONFIG_1, config1);
-
+    
     setLdoFlag();
 }
 
 void LoRa::setCodingRate(uint8_t cr) {
     if (cr < 5) cr = 5;
     else if (cr > 8) cr = 8;
-
+    
     cr -= 4;
-
+    
     uint8_t config1 = readRegister(REG_MODEM_CONFIG_1);
     config1 = (config1 & 0xF1) | (cr << 1);
     writeRegister(REG_MODEM_CONFIG_1, config1);
@@ -231,16 +237,16 @@ void LoRa::setCodingRate(uint8_t cr) {
 void LoRa::setTxPower(uint8_t level) {
     if (level > 20) level = 20;
     else if (level < 2) level = 2;
-
+    
     // PA BOOST
     if (level > 17) {
         if (level > 20) {
             level = 20;
         }
-
+        
         // subtract 3 from level, so 18 - 20 maps to 15 - 17
         level -= 3;
-
+        
         // High Power +20 dBm Operation (Semtech SX1276/77/78/79 5.4.3.)
         writeRegister(REG_PA_DAC, 0x87);
         setOCP(140);
@@ -252,7 +258,7 @@ void LoRa::setTxPower(uint8_t level) {
         writeRegister(REG_PA_DAC, 0x84);
         setOCP(100);
     }
-
+    
     writeRegister(REG_PA_CONFIG, PA_BOOST | (level - 2));
 }
 
@@ -272,13 +278,13 @@ void LoRa::disableCrc() {
 
 void LoRa::setOCP(uint8_t mA) {
     uint8_t ocpTrim = 27;
-
+    
     if (mA <= 120) {
         ocpTrim = (mA - 45) / 5;
     } else if (mA <= 240) {
         ocpTrim = (mA + 30) / 10;
     }
-
+    
     writeRegister(REG_OCP, 0x20 | (0x1F & ocpTrim));
 }
 
@@ -286,16 +292,16 @@ void LoRa::setLdoFlag() {
     // Section 4.1.1.5
     uint8_t sf = (readRegister(REG_MODEM_CONFIG_2) >> 4);
     uint32_t bw = 125000;  // Default, would need to track actual BW
-
+    
     // Symbol rate : Rs = BW / (2^SF)
     // Symbol duration: Ts = 1/Rs = (2^SF) / BW
     // Ts(msec) = (2^SF * 1000) / BW
-
+    
     uint32_t symbolDuration = 1000 / (bw / (1L << sf));
-
+    
     // Section 4.1.1.6
     bool ldoOn = symbolDuration > 16;
-
+    
     uint8_t config3 = readRegister(REG_MODEM_CONFIG_3);
     bitWrite(config3, 3, ldoOn);
     writeRegister(REG_MODEM_CONFIG_3, config3);
@@ -315,22 +321,22 @@ void LoRa::receive() {
 
 bool LoRa::sendBytes(const uint8_t* data, uint8_t length) {
     idle();
-
+    
     // Reset FIFO address and payload length
     writeRegister(REG_FIFO_ADDR_PTR, 0);
     writeRegister(REG_PAYLOAD_LENGTH, 0);
-
+    
     // Write data
     for (uint8_t i = 0; i < length; i++) {
         writeRegister(REG_FIFO, data[i]);
     }
-
+    
     // Update length
     writeRegister(REG_PAYLOAD_LENGTH, length);
-
+    
     // Start transmission
     setMode(MODE_TX);
-
+    
     // Wait for TX done
     uint32_t timeout = esp_log_timestamp() + 2000;  // 2 second timeout
     while ((readRegister(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0) {
@@ -342,46 +348,60 @@ bool LoRa::sendBytes(const uint8_t* data, uint8_t length) {
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-
+    
     // Clear IRQ
     writeRegister(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK);
-
+    
     stats.packets_sent++;
     return true;
 }
 
 uint8_t LoRa::receiveBytes(uint8_t* data, uint8_t maxLength) {
     uint8_t irqFlags = readRegister(REG_IRQ_FLAGS);
-
+    
     // Clear IRQ
     writeRegister(REG_IRQ_FLAGS, irqFlags);
-
+    
     if ((irqFlags & IRQ_RX_DONE_MASK) == 0) {
         return 0;  // No packet received
     }
-
+    
+    ESP_LOGI(TAG, "RX_DONE flag set, IRQ flags: 0x%02X", irqFlags);
+    
     if (irqFlags & IRQ_PAYLOAD_CRC_ERROR_MASK) {
-        ESP_LOGW(TAG, "CRC error!");
+        ESP_LOGW(TAG, "CRC error on received packet!");
         stats.packets_failed++;
         return 0;
     }
-
+    
     // Read packet length
     uint8_t length = readRegister(REG_RX_NB_BYTES);
-    if (length > maxLength) length = maxLength;
-
+    ESP_LOGI(TAG, "Received packet length: %d bytes (expected %d)", length, sizeof(RideLinkPacket));
+    
+    if (length > maxLength) {
+        ESP_LOGW(TAG, "Packet too large: %d > %d", length, maxLength);
+        length = maxLength;
+    }
+    
     // Read FIFO
     writeRegister(REG_FIFO_ADDR_PTR, readRegister(REG_FIFO_RX_CURRENT_ADDR));
-
+    
     for (uint8_t i = 0; i < length; i++) {
         data[i] = readRegister(REG_FIFO);
     }
-
+    
+    // Log first few bytes for debugging
+    ESP_LOGI(TAG, "First bytes: %02X %02X %02X %02X", 
+             data[0], data[1], data[2], data[3]);
+    
     stats.packets_received++;
     stats.last_rx_time = esp_log_timestamp();
     stats.last_rssi = getPacketRSSI();
     stats.last_snr = getPacketSNR();
-
+    
+    ESP_LOGI(TAG, "Packet received successfully - RSSI: %d dBm, SNR: %d dB", 
+             stats.last_rssi, stats.last_snr);
+    
     return length;
 }
 
@@ -390,7 +410,7 @@ bool LoRa::sendPacket(const RideLinkPacket& packet) {
     txPacket.device_id = device_id;
     txPacket.timestamp = esp_log_timestamp();
     txPacket.checksum = txPacket.calculateChecksum();
-
+    
     return sendBytes((const uint8_t*)&txPacket, sizeof(RideLinkPacket));
 }
 
@@ -400,27 +420,27 @@ bool LoRa::receivePacket(RideLinkPacket& packet, uint32_t timeout_ms) {
             return false;
         }
     }
-
+    
     uint8_t buffer[sizeof(RideLinkPacket)];
     uint8_t length = receiveBytes(buffer, sizeof(buffer));
-
+    
     if (length != sizeof(RideLinkPacket)) {
         if (length > 0) {
             ESP_LOGW(TAG, "Invalid packet size: %d (expected %d)", length, sizeof(RideLinkPacket));
         }
         return false;
     }
-
+    
     memcpy(&packet, buffer, sizeof(RideLinkPacket));
-
+    
     if (!packet.verifyChecksum()) {
         ESP_LOGW(TAG, "Packet checksum failed!");
         stats.packets_failed++;
         return false;
     }
-
+    
     packet.rssi = stats.last_rssi;
-
+    
     return true;
 }
 
@@ -431,7 +451,7 @@ bool LoRa::broadcastLocation(const GPSPacket& gps, int16_t heading) {
     packet.gps = gps;
     packet.compass_heading = heading;
     packet.battery_level = 100;  // TODO: Add real battery monitoring
-
+    
     return sendPacket(packet);
 }
 
@@ -441,14 +461,14 @@ bool LoRa::available() {
 
 bool LoRa::waitForPacket(uint32_t timeout_ms) {
     uint32_t start = esp_log_timestamp();
-
+    
     while (!available()) {
         if (esp_log_timestamp() - start > timeout_ms) {
             return false;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-
+    
     return true;
 }
 
@@ -463,14 +483,14 @@ int8_t LoRa::getSNR() {
 int8_t LoRa::getPacketRSSI() {
     int8_t snr = getSNR();
     int16_t rssi = readRegister(REG_PKT_RSSI_VALUE);
-
+    
     // Adjust for low data rate optimization
     if (snr < 0) {
         rssi = rssi - 164 + snr;
     } else {
         rssi = rssi - 164;
     }
-
+    
     return rssi;
 }
 
