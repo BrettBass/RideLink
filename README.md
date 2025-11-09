@@ -1,65 +1,237 @@
-# RideLink: Off-Grid Group Rider Device 🏍️📡
+# RideLink GPS Navigation System
 
-**RideLink** is an affordable, peer-to-peer communication and navigation system designed specifically to prevent group riders (motorcyclists, off-road enthusiasts, etc.) from getting separated in areas with no cellular service. It leverages **LoRa (Long Range) radio technology** to provide basic directional guidance and status updates, keeping your group together, no matter how remote the ride.
+## Overview
 
-## 🌟 Features
+RideLink is a peer-to-peer GPS navigation system that enables two devices to locate and track each other using GPS, compass, and LoRa communication. Perfect for outdoor activities, hiking, biking, or any scenario where two people need to find each other without cellular connectivity.
 
-* **Off-Grid Reliability:** Operates independently of cellular networks, GPS, or Wi-Fi. Ideal for remote and off-road environments.
-* **Peer-to-Peer Direction:** Displays a simple **directional arrow** pointing toward a selected group member.
-* **Proximity Indicator:** Uses a color-coded bar/ring based on **Signal Strength (RSSI)** to show distance:
-    * 🟢 **Green:** Close proximity
-    * 🟡 **Yellow:** Moderate distance
-    * 🔴 **Red:** Far away
-* **Pre-set Messaging:** Send quick, one-touch status updates like "Wait," "Go," "Stop," or "Help."
-* **Low-Cost & Simple:** Designed to be affordable and easy to use, featuring a small screen and minimal buttons.
+## Features
 
----
+- **Peer-to-Peer Tracking**: Two devices automatically find and track each other
+- **GPS Navigation**: Real-time location tracking with distance calculation
+- **Smart Compass**: Magnetometer with automatic calibration and hard/soft iron compensation
+- **Long Range Communication**: LoRa radio for 1-2km range without infrastructure
+- **Visual Indicators**: Color-coded arrow showing direction to peer
+- **Persistent Calibration**: Compass calibration saved to non-volatile storage
+- **Link Quality Monitoring**: RSSI and packet success rate tracking
 
-## 🚧 The Problem: Why RideLink Exists
+## Hardware Requirements
 
-It's an all-too-common experience for group riders to get separated due to traffic, different speeds, or unexpected stops—especially in areas with unreliable or non-existent cell service.
+### Core Components
+- ESP32 Development Board (2x)
+- NEO-6M GPS Module (2x)
+- QMC5883L Compass Module (2x)
+- SX1278 LoRa Module (2x)
+- GC9A01 Round LCD Display (2x)
 
-Current solutions fall short:
+### Pin Connections
 
-* **Cell Phones:** Fail completely without reception.
-* **High-End GPS Devices:** Are expensive, and often don't solve the peer-to-peer communication problem.
+#### GPS Module (NEO-6M)
+```
+GPS TX  → ESP32 GPIO16 (RX2)
+GPS RX  → ESP32 GPIO17 (TX2)
+VCC     → 3.3V
+GND     → GND
+```
 
-**RideLink fills this gap** by providing a safety net: a reliable, basic directional and communication tool that ensures everyone can easily find their way back to the group.
+#### Compass Module (QMC5883L)
+```
+SDA → ESP32 GPIO21
+SCL → ESP32 GPIO22
+VCC → 3.3V
+GND → GND
+```
 
----
+#### LoRa Module (SX1278)
+```
+SCK  → ESP32 GPIO18
+MISO → ESP32 GPIO19
+MOSI → ESP32 GPIO23
+NSS  → ESP32 GPIO32
+RST  → ESP32 GPIO12
+DIO0 → ESP32 GPIO2
+VCC  → 3.3V
+GND  → GND
+```
 
-## 🛠️ Technology & Hardware (Planned)
+#### Display (GC9A01)
+```
+SCK  → ESP32 GPIO14
+MOSI → ESP32 GPIO13
+CS   → ESP32 GPIO15
+DC   → ESP32 GPIO27
+RST  → ESP32 GPIO26
+BL   → ESP32 GPIO25
+VCC  → 3.3V
+GND  → GND
+```
 
-The core of the RideLink system is based on low-power, compact electronics:
+## Software Setup
 
-| Component | Purpose |
-| :--- | :--- |
-| **LoRa Radio Module** | Handles all long-range, peer-to-peer data transmission. |
-| **Microcontroller (MCU)** | Processes signals, manages the display, and controls the UI. |
-| **Small On-Board Screen** | Displays distance color code, directional arrow, and messages. |
-| **Directional Antenna** | (Proposed) For achieving basic directional readings by comparing signal strength. |
-| **Push Buttons** | For cycling through contacts and sending pre-set messages. |
+### Prerequisites
 
-### 🧭 How Location Tracking Works
+1. Install ESP-IDF v5.0 or later
+2. Set up ESP-IDF environment variables
 
-RideLink deliberately avoids using expensive or complex GPS modules. Instead, it estimates the relative position of other riders using the **Received Signal Strength Indicator (RSSI)** of the LoRa transmissions.
+### Building and Flashing
 
-* **Distance Estimation:** RSSI is translated directly into the color-coded proximity indicator. A stronger signal (closer) means a greener color.
-* **Directional Guidance:** Directional information will be derived by comparing the RSSI from different angles or antennas to determine the **general** bearing of the strongest signal from the selected rider.
+1. **Configure Device ID** (IMPORTANT!)
+   
+   Edit `RideLink.cpp` and set unique IDs:
+   ```cpp
+   #define DEVICE_ID 1  // Device 1
+   ```
+   ```cpp
+   #define DEVICE_ID 2  // Device 2
+   ```
 
----
+2. **Set Frequency Region**
+   ```cpp
+   #define LORA_FREQUENCY 915.0  // US: 915.0, EU: 868.0, AS: 923.0
+   ```
 
-## 🚀 Getting Started (Future)
+3. **Build the project**
+   ```bash
+   idf.py build
+   ```
 
-This section will be updated with setup instructions and schematics as development progresses.
+4. **Flash to ESP32**
+   ```bash
+   idf.py -p /dev/ttyUSB0 flash monitor
+   ```
 
-### To Do List:
+## Usage
 
-- [ ] Select initial MCU and LoRa module (e.g., ESP32/SX1276).
-- [ ] Develop initial firmware for peer-to-peer connection.
-- [ ] Implement basic RSSI-to-Color-Code logic.
-- [ ] Design and test the directional logic (antenna/RSSI comparison).
-- [ ] Create simple display UI and button controls.
-- [ ] Design 3D-printable weatherproof enclosure.
+### Display Indicators
 
----
+#### Arrow Colors
+- 🟢 **GREEN**: Pointing to peer device (both have GPS)
+- 🟡 **YELLOW**: Peer found but no GPS fix
+- 🔵 **CYAN**: Pointing north (GPS fix, no peer)
+- ⚫ **GRAY**: Magnetic north only (no GPS, no peer)
+
+#### Status Dots
+- **Top-Right**: GPS status (green=fixed, red=searching)
+- **Top-Center**: Peer connection (green=connected, red=searching)
+- **Top-Left**: Calibration quality (green=good, yellow=fair, red=poor)
+
+### Compass Calibration
+
+1. **Enter Calibration Mode**
+   - Hold BOOT button for 3 seconds
+
+2. **Calibration Options**
+   - **Quick Press**: Magnetometer calibration
+   - **Hold 1 second**: Heading offset calibration
+   - **Hold 5 seconds**: Clear all calibration
+
+3. **Magnetometer Calibration Process**
+   - Rotate device slowly in all directions
+   - Make figure-8 patterns
+   - Continue until progress bar completes
+   - Calibration automatically saves to NVS
+
+### Troubleshooting
+
+#### No GPS Fix
+- Ensure clear view of sky
+- Wait 30-60 seconds for cold start
+- Check antenna connection
+
+#### No Peer Connection
+- Verify both devices have different IDs
+- Check LoRa antenna connections
+- Ensure same frequency setting
+- Reduce distance to <100m for initial test
+
+#### Compass Issues
+- Keep away from metal objects
+- Perform calibration
+- Check I2C connections
+
+## Project Structure
+
+```
+RideLink/
+├── main/
+│   ├── RideLink.cpp         # Main application
+│   └── CMakeLists.txt       # Component build config
+├── include/
+│   ├── GPS.hpp              # GPS interface
+│   ├── Compass.hpp          # Compass interface
+│   ├── Display.hpp          # Display interface
+│   ├── LoRa.hpp            # LoRa interface
+│   ├── CompassCalibrator.hpp # Calibration system
+│   └── Config.hpp          # System configuration
+├── src/
+│   ├── GPS.cpp             # GPS implementation
+│   ├── Compass.cpp         # Compass implementation
+│   ├── Display.cpp         # Display implementation
+│   ├── LoRa.cpp           # LoRa implementation
+│   └── CompassCalibrator.cpp # Calibration implementation
+├── CMakeLists.txt          # Project build config
+└── README.md              # This file
+```
+
+## Performance Specifications
+
+- **Update Rates**
+  - GPS: 1 Hz
+  - Compass: 10 Hz
+  - Display: 10 Hz
+  - LoRa broadcast: 0.5 Hz
+
+- **Communication Range**
+  - Urban: 500m - 1km
+  - Open field: 1km - 2km
+  - With elevation: 2km+
+
+- **Power Consumption**
+  - Active: ~200mA @ 3.3V
+  - With GPS fix: ~150mA @ 3.3V
+
+## Configuration Options
+
+Edit `Config.hpp` to customize:
+
+```cpp
+// Timing
+constexpr uint32_t LORA_BROADCAST_RATE_MS = 2000;  // Location broadcast rate
+constexpr uint32_t PEER_TIMEOUT_MS = 10000;        // Connection timeout
+
+// LoRa Parameters
+constexpr uint8_t LORA_SPREADING_FACTOR = 9;  // 6-12 (higher=longer range)
+constexpr uint32_t LORA_BANDWIDTH = 125000;    // Bandwidth in Hz
+constexpr uint8_t LORA_TX_POWER = 17;          // 2-20 dBm
+
+// Compass
+constexpr float MAGNETIC_DECLINATION = 11.5;   // Local magnetic declination
+```
+
+## API Reference
+
+### GPS Class
+```cpp
+bool isFixed()                    // Check if GPS has position fix
+GPSPacket getPacket()             // Get compact GPS data for transmission
+double getLatitude()              // Get current latitude
+double getLongitude()             // Get current longitude
+```
+
+### Compass Class
+```cpp
+float getHeading()                // Get compass heading (0-359°)
+void setDeclination(float decl)   // Set magnetic declination
+void startCalibration()           // Begin calibration process
+```
+
+### LoRa Class
+```cpp
+bool sendPacket(const RideLinkPacket& packet)  // Send data packet
+bool receivePacket(RideLinkPacket& packet)     // Receive data packet
+int8_t getRSSI()                               // Get signal strength
+const LinkStats& getStats()                    // Get link statistics
+```
+
+## Acknowledgments
+
+- Coffee
